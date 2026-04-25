@@ -1,0 +1,254 @@
+clc; clear; close all;
+
+%% ------------------------------------------------------------------------
+% DataAugmentation_ForTrain_STED
+% For paired confocal/STED tif images
+%
+% Input (place this script next to the STEDSR dataset root):
+%   ./STEDSR/microtubules/confocal
+%   ./STEDSR/microtubules/STED_50mW_1
+%
+% Output:
+%   ./STEDSR/microtubules/patch/
+%       training_LR/
+%       training_HR/
+%       validate_LR/
+%       validate_HR/
+%
+% Notes:
+%   1) training / validation are patch-based datasets
+%   2) input = confocal (LR), gt = STED (HR)
+% -------------------------------------------------------------------------
+
+%% ========================= parameters =========================
+datasetRoot = './STEDSR/microtubules';
+
+inputDir = fullfile(datasetRoot, 'confocal');
+gtDir    = fullfile(datasetRoot, 'STED_50mW_1');
+
+saveRoot = fullfile(datasetRoot, 'patch');
+
+% patch size
+SegX = 128;
+SegY = 128;
+
+% augmentation control
+RotFlag = 2; 
+% 0 = no rotation
+% 1 = random rotation only
+% 2 = random rotation + flip augmentation
+
+% split
+numTrain = 220;
+numVal   = 30;
+%numTest  = 21;   % 220 + 30 + 21 = 271
+
+% patch pair numbers
+TotalSegNum    = 12000;   % total training patch pairs
+ValidateSegNum = 1200;    % total validation patch pairs
+
+% random seed for reproducibility
+rng(20260319);
+
+%% ========================= output folders =========================
+save_training_LR_path = fullfile(saveRoot, 'training_LR');
+save_training_HR_path = fullfile(saveRoot, 'training_HR');
+
+save_validate_LR_path = fullfile(saveRoot, 'validate_LR');
+save_validate_HR_path = fullfile(saveRoot, 'validate_HR');
+
+% remove old folders and recreate
+resetFolder(save_training_LR_path);
+resetFolder(save_training_HR_path);
+resetFolder(save_validate_LR_path);
+resetFolder(save_validate_HR_path);
+
+%% ========================= file list =========================
+inputFiles = dir(fullfile(inputDir, '*.tif'));
+gtFiles    = dir(fullfile(gtDir, '*.tif'));
+
+if isempty(inputFiles)
+    error('No tif files found in confocal folder: %s', inputDir);
+end
+if isempty(gtFiles)
+    error('No tif files found in STED folder: %s', gtDir);
+end
+
+inputNames = sort({inputFiles.name});
+gtNames    = sort({gtFiles.name});
+
+if numel(inputNames) ~= numel(gtNames)
+    error('The numbers of confocal and STED images are not equal.');
+end
+
+N = numel(inputNames);
+if N < (numTrain + numVal)
+    error('Not enough image pairs for the requested split.');
+end
+
+fprintf('Total paired images found: %d\n', N);
+
+%% ========================= split dataset =========================
+allIdx = randperm(N);
+
+trainIdx = allIdx(1:numTrain);
+valIdx   = allIdx(numTrain+1 : numTrain+numVal);
+
+fprintf('Train: %d pairs\n', numel(trainIdx));
+fprintf('Val  : %d pairs\n', numel(valIdx));
+
+%% ========================= generate validation patches =========================
+fprintf('\nGenerating validation patches...\n');
+patchPerValImage = ceil(ValidateSegNum / numel(valIdx));
+imgCount = 1;
+
+for ii = 1:numel(valIdx)
+    idx = valIdx(ii);
+
+    fprintf('Validation image %d / %d\n', ii, numel(valIdx));
+
+    inputPath = fullfile(inputDir, inputNames{idx});
+    gtPath    = fullfile(gtDir, gtNames{idx});
+
+    imgInput = imread(inputPath);
+    imgGT    = imread(gtPath);
+
+    imgInput = normalizeToDouble(imgInput);
+    imgGT    = normalizeToDouble(imgGT);
+
+    [inputPatches, gtPatches] = generatePatchPairs2D( ...
+        imgInput, imgGT, patchPerValImage, SegX, SegY, RotFlag);
+
+    numPatch = size(gtPatches, 3);
+
+    for n = 1:numPatch
+        patchInput = uint16(inputPatches(:,:,n) * 65535);
+        patchGT    = uint16(gtPatches(:,:,n) * 65535);
+
+        imwrite(patchInput, fullfile(save_validate_LR_path, sprintf('%08d.tif', imgCount)));
+        imwrite(patchGT,    fullfile(save_validate_HR_path, sprintf('%08d.tif', imgCount)));
+
+        imgCount = imgCount + 1;
+    end
+end
+
+%% ========================= generate training patches =========================
+fprintf('\nGenerating training patches...\n');
+patchPerTrainImage = ceil(TotalSegNum / numel(trainIdx));
+imgCount = 1;
+
+for ii = 1:numel(trainIdx)
+    idx = trainIdx(ii);
+
+    fprintf('Training image %d / %d\n', ii, numel(trainIdx));
+
+    inputPath = fullfile(inputDir, inputNames{idx});
+    gtPath    = fullfile(gtDir, gtNames{idx});
+
+    imgInput = imread(inputPath);
+    imgGT    = imread(gtPath);
+
+    imgInput = normalizeToDouble(imgInput);
+    imgGT    = normalizeToDouble(imgGT);
+
+    [inputPatches, gtPatches] = generatePatchPairs2D( ...
+        imgInput, imgGT, patchPerTrainImage, SegX, SegY, RotFlag);
+
+    numPatch = size(gtPatches, 3);
+
+    for n = 1:numPatch
+        patchInput = uint16(inputPatches(:,:,n) * 65535);
+        patchGT    = uint16(gtPatches(:,:,n) * 65535);
+
+        imwrite(patchInput, fullfile(save_training_LR_path, sprintf('%08d.tif', imgCount)));
+        imwrite(patchGT,    fullfile(save_training_HR_path, sprintf('%08d.tif', imgCount)));
+
+        imgCount = imgCount + 1;
+    end
+end
+
+fprintf('\nDone.\n');
+fprintf('Training patches saved to: %s\n', save_training_LR_path);
+fprintf('Training GT saved to     : %s\n', save_training_HR_path);
+fprintf('Validation patches saved : %s\n', save_validate_LR_path);
+fprintf('Validation GT saved to   : %s\n', save_validate_HR_path);
+
+%% ========================= local functions =========================
+function resetFolder(folderPath)
+    if exist(folderPath, 'dir')
+        rmdir(folderPath, 's');
+    end
+    mkdir(folderPath);
+end
+
+function img = normalizeToDouble(img)
+    img = double(img);
+    img = img - min(img(:));
+    maxv = max(img(:));
+    if maxv > 0
+        img = img / maxv;
+    end
+end
+
+function img16 = normalizeToUint16(img)
+    img = double(img);
+    img = img - min(img(:));
+    maxv = max(img(:));
+    if maxv > 0
+        img = img / maxv;
+    end
+    img16 = uint16(img * 65535);
+end
+
+function [inputPatches, gtPatches] = generatePatchPairs2D(inputImg, gtImg, patchNum, segX, segY, rotFlag)
+    [H, W] = size(inputImg);
+
+    if H < segY || W < segX
+        error('Image size is smaller than patch size.');
+    end
+
+    inputPatches = zeros(segY, segX, patchNum);
+    gtPatches    = zeros(segY, segX, patchNum);
+
+    for k = 1:patchNum
+        % random crop
+        x = randi([1, W - segX + 1]);
+        y = randi([1, H - segY + 1]);
+
+        patchIn = inputImg(y:y+segY-1, x:x+segX-1);
+        patchGt = gtImg(y:y+segY-1, x:x+segX-1);
+
+        % random rotation
+        if rotFlag >= 1
+            angle = rand * 360;
+            patchIn = imrotate(patchIn, angle, 'bilinear', 'crop');
+            patchGt = imrotate(patchGt, angle, 'bilinear', 'crop');
+        end
+
+        % random flipping
+        if rotFlag >= 2
+            if rand > 0.5
+                patchIn = fliplr(patchIn);
+                patchGt = fliplr(patchGt);
+            end
+            if rand > 0.5
+                patchIn = flipud(patchIn);
+                patchGt = flipud(patchGt);
+            end
+        end
+
+        % normalize each patch again for safety
+        patchIn = patchIn - min(patchIn(:));
+        if max(patchIn(:)) > 0
+            patchIn = patchIn / max(patchIn(:));
+        end
+
+        patchGt = patchGt - min(patchGt(:));
+        if max(patchGt(:)) > 0
+            patchGt = patchGt / max(patchGt(:));
+        end
+
+        inputPatches(:,:,k) = patchIn;
+        gtPatches(:,:,k)    = patchGt;
+    end
+end
